@@ -130,6 +130,9 @@ importers:
       next-themes:
         specifier: ^0.4.6
         version: 0.4.6(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
+      node:
+        specifier: ^20.19.6
+        version: 20.19.6
       react:
         specifier: ^19.0.0
         version: 19.2.0
@@ -3759,6 +3762,9 @@ packages:
   node-api-version@0.2.1:
     resolution: {integrity: sha512-2xP/IGGMmmSQpI1+O/k72jF/ykvZ89JeuKX3TLJAYPDVLUalrshrLHkeVcCCZqG/eEa635cr8IBYzgnDvM2O8Q==}
 
+  node-bin-setup@1.1.4:
+    resolution: {integrity: sha512-vWNHOne0ZUavArqPP5LJta50+S8R261Fr5SvGul37HbEDcowvLjwdvd0ZeSr0r2lTSrPxl6okq9QUw8BFGiAxA==}
+
   node-fetch@2.7.0:
     resolution: {integrity: sha512-c4FRfUm/dbcWZ7U+1Wq0AwCyFL+3nt2bEw05wfxSz+DWpWsitgmSgYmy2dQdWyKC1694ELPqMs/YzUSNozLt8A==}
     engines: {node: 4.x || >=6.0.0}
@@ -3779,6 +3785,11 @@ packages:
 
   node-releases@2.0.23:
     resolution: {integrity: sha512-cCmFDMSm26S6tQSDpBCg/NR8NENrVPhAJSf+XbxBG4rPFaaonlEoE9wHQmun+cls499TQGSb7ZyPBRlzgKfpeg==}
+
+  node@20.19.6:
+    resolution: {integrity: sha512-EDRH8t/R6cBUGCXA+MMQ4fSafg/jDPltwL7RWDODKj7O/vAZXOO8w5GA3sIQp0wQnmxQlgApJUYzEjs5MGu9Zg==}
+    engines: {npm: '>=5.0.0'}
+    hasBin: true
 
   nopt@5.0.0:
     resolution: {integrity: sha512-Tbj67rffqceeLpcRXrT7vKAN8CwfPeIBgM7E6iBkmKLV7bEMwpGgYLGv0jACUsECaa/vuxP0IjEont6umdMgtQ==}
@@ -8980,6 +8991,8 @@ snapshots:
     dependencies:
       semver: 7.7.3
 
+  node-bin-setup@1.1.4: {}
+
   node-fetch@2.7.0(encoding@0.1.13):
     dependencies:
       whatwg-url: 5.0.0
@@ -9006,6 +9019,10 @@ snapshots:
     optional: true
 
   node-releases@2.0.23: {}
+
+  node@20.19.6:
+    dependencies:
+      node-bin-setup: 1.1.4
 
   nopt@5.0.0:
     dependencies:
