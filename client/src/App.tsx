@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/NotFound";
@@ -19,6 +20,15 @@ function Router() {
 }
 
 function App() {
+    // Handle GitHub Pages 404 redirect for SPA routing
+  useEffect(() => {
+    const redirect = sessionStorage.redirect;
+    delete sessionStorage.redirect;
+    if (redirect && redirect !== location.href) {
+      history.replaceState({}, '', redirect.replace(/~and~/g, '&'));
+    }
+  }, []);
+  
   return (
     <ErrorBoundary>
       <ThemeProvider

@@ -10,7 +10,7 @@ const plugins = [react(), tailwindcss(), jsxLocPlugin(), vitePluginManusRuntime(
 
 export default defineConfig({
   plugins,
-  base: '/motor-ble-controller/',
+  base: "/motor-ble-controller/",
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "client", "src"),
