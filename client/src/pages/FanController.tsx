@@ -395,8 +395,8 @@ export default function FanController() {
                     disabled={!connected}
                     className={`w-full tech-button py-4 rounded-xl font-semibold transition-all ${
                       currentMode === 'low'
-                        ? 'bg-warning text-white shadow-lg'
-                        : 'bg-warning/10 text-warning hover:bg-warning/20'
+                        ? 'bg-green-500 text-green-foreground shadow-lg'
+                        : 'bg-green-100 text-green-700 hover:bg-green-200'
                     } disabled:opacity-50 disabled:cursor-not-allowed`}
                   >
                     <span className="text-lg">🌀</span> Low (10 rad/s)
@@ -502,10 +502,10 @@ export default function FanController() {
                       <div
                         className={`h-full transition-all duration-300 ${
                           motorState.anomalyPercentage < 30
-                            ? 'bg-success'
+                            ? 'bg-green-500'
                             : motorState.anomalyPercentage < 70
-                              ? 'bg-warning'
-                              : 'bg-destructive'
+                              ? 'bg-yellow-500'
+                              : 'bg-red-500'
                         }`}
                         style={{
                           width: `${motorState.anomalyPercentage}%`,
