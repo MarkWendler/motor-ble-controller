@@ -11,7 +11,7 @@ import FanController from "./pages/FanController";
 function Router() {
   return (
     <Switch>
-      <Route path={"/"} component={FanController} />
+      <Route path={"/motor-ble-controller/"} component={FanController} />
       <Route path={"/404"} component={NotFound} />
       {/* Final fallback route */}
       <Route component={NotFound} />
