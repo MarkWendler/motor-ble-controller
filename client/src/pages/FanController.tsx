@@ -229,10 +229,10 @@ export default function FanController() {
         command = 'M0';
         break;
       case 'low':
-        command = 'M10';
+        command = 'M7';
         break;
       case 'high':
-        command = 'M20';
+        command = 'M16';
         break;
     }
 
@@ -457,7 +457,7 @@ export default function FanController() {
                       motorState.status === 'Error'
                         ? 'bg-destructive'
                         : motorState.status === 'Running'
-                          ? 'bg-success'
+                          ? 'bg-green-500'
                           : 'bg-muted'
                     }`} />
                   </div>
@@ -482,7 +482,8 @@ export default function FanController() {
                   <div className="flex items-center justify-between mb-3">
                     <span className="text-sm font-medium text-muted-foreground">Anomaly Detection</span>
                     <div className={`status-led ${motorState.anomalyDetected ? 'active' : ''} ${
-                      motorState.anomalyDetected ? 'bg-warning' : 'bg-success'
+                      motorState.anomalyActive ? 'bg-muted' :
+                        motorState.anomalyDetected ? 'bg-yellow-500' : 'bg-green-500'
                     }`} />
                   </div>
                   

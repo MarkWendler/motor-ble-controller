@@ -18,12 +18,13 @@ export interface MotorTelemetry {
   rpm: number; // calculated from speed
   anomalyPercentage: number; // 0-100%
   anomalyDetected: boolean; // true if anomaly > 50%
+  anomalyActive: boolean; // true if anomaly is currently active
   timestamp: number;
 }
 
 /**
  * Parse telemetry message from firmware
- * Format: "Motor: <status>  Speed: <speed> Anomaly: <percentage>%"
+ * Format: "Motor: <status>  Speed: <speed> Anomaly: <percentage>% [mode: <imu|audio>]"
  * 
  * @param message - Raw telemetry message string
  * @returns Parsed telemetry data or null if invalid
@@ -33,8 +34,8 @@ export function parseTelemetry(message: string): MotorTelemetry | null {
     // Trim whitespace
     const line = message.trim();
 
-    // Match pattern: Motor: <status>  Speed: <speed> Anomaly: <percentage>%
-    const regex = /Motor:\s*(\w+)\s+Speed:\s*([\d.]+)\s+Anomaly:\s*(\d+)%/i;
+    // Match pattern: Motor: <status>  Speed: <speed> Anomaly: <percentage>% 
+    const regex = /Motor:\s*(\w+)\s+Speed:\s*([\d.]+)\s+Anomaly:\s*(\d+)%(?:\s+mode:\s*(imu|audio))?/i;
     const match = line.match(regex);
 
     if (!match) {
@@ -45,6 +46,7 @@ export function parseTelemetry(message: string): MotorTelemetry | null {
     const status = match[1] as 'Running' | 'Stop' | 'Error';
     const speed = parseFloat(match[2]);
     const anomalyPercentage = parseInt(match[3], 10);
+    const mode = match[4] ? (match[4].toLowerCase() as 'imu' | 'audio') : undefined;
 
     // Validate status
     if (!['Running', 'Stop', 'Error'].includes(status)) {
@@ -70,12 +72,17 @@ export function parseTelemetry(message: string): MotorTelemetry | null {
     // Detect anomaly (true if percentage > 50%)
     const anomalyDetected = anomalyPercentage > 50;
 
+    const anomalyActive = mode === 'imu';
+
+  
+
     return {
       status,
       speed,
       rpm,
       anomalyPercentage,
       anomalyDetected,
+      anomalyActive,
       timestamp: Date.now(),
     };
   } catch (error) {
@@ -158,6 +165,6 @@ export function createTestTelemetry(
  * @returns true if message matches expected format
  */
 export function isValidTelemetryFormat(message: string): boolean {
-  const regex = /Motor:\s*(\w+)\s+Speed:\s*([\d.]+)\s+Anomaly:\s*(\d+)%/i;
+  const regex = /Motor:\s*(\w+)\s+Speed:\s*([\d.]+)\s+Anomaly:\s*(\d+)%(?:\s+mode:\s*(imu|audio))?/i;
   return regex.test(message.trim());
 }
