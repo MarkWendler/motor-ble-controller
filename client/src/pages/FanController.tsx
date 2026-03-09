@@ -341,7 +341,7 @@ export default function FanController() {
                   <div className="flex items-start gap-3">
                     <CheckCircle2 className="w-5 h-5 text-accent flex-shrink-0 mt-0.5" />
                     <div>
-                      <p className="font-medium text-foreground">Anomaly Detection</p>
+                      <p className="font-medium text-foreground">Anomaly Detection Active Sign</p>
                       <p className="text-xs text-muted-foreground">AI/ML Edge Processing</p>
                     </div>
                   </div>
@@ -482,7 +482,7 @@ export default function FanController() {
                   <div className="flex items-center justify-between mb-3">
                     <span className="text-sm font-medium text-muted-foreground">Anomaly Detection</span>
                     <div className={`status-led ${motorState.anomalyDetected ? 'active' : ''} ${
-                      motorState.anomalyActive ? 'bg-muted' :
+                      !motorState.anomalyActive ? 'bg-muted' :
                         motorState.anomalyDetected ? 'bg-yellow-500' : 'bg-green-500'
                     }`} />
                   </div>
