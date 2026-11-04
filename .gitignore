@@ -106,3 +106,6 @@ temp/
 *.db
 *.sqlite
 *.sqlite3
+
+# Local toolchain bootstrap
+.tooling/
