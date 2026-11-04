@@ -100,11 +100,11 @@ Commands are sent to the motor control board as simple text strings:
 Each command is terminated with a newline character (`\n`).
 
 ### Feedback Format
-The motor control board sends feedback approximately every 500ms (2 Hz). Two formats are accepted, and the UI adapts to whichever the board sends:
+The motor control board sends feedback approximately every 500ms (2 Hz). Two formats are accepted, and the UI adapts to whichever the board sends. Both may carry an optional `mode:` suffix naming the sensor driving the edge model:
 
 ```
-Motor: <status>  Speed: <speed_value> Anomaly: <score>%
-Motor: <status>  Speed: <speed_value> Anomaly: <NORMAL|SLOWED|BLOCKED>
+Motor: <status>  Speed: <speed_value> Anomaly: <score>% [mode: <imu|audio>]
+Motor: <status>  Speed: <speed_value> Anomaly: <NORMAL|SLOWED|BLOCKED> [mode: <imu|audio>]
 ```
 
 **Example:**
@@ -139,6 +139,18 @@ The score is mapped to a state at fixed thresholds (`ANOMALY_SLOWED_SCORE` and `
 The meter bands read from those same constants, so the percentage and the state readout can never disagree.
 
 With **Auto-Shutoff** enabled (`AOFF1`), the firmware stops the motor itself once an anomaly persists, rather than relying on the operator. The toggle reflects what the app last sent; it resets to off on disconnect, matching the firmware default.
+
+### Detection Modes
+
+The model scores IMU data. When a frame reports `mode: audio`, the board is streaming audio and the model is not scoring, so any number still present in the frame is stale.
+
+Rather than greying out a single indicator, the Anomaly Detection panel switches to a dedicated audio state: a violet card with a level indicator, the heading "Scoring paused — audio mode", and an explanation. The score meter and the NORMAL/SLOWED/BLOCKED readout are hidden while it is showing, so a stale number cannot be mistaken for a live reading; the value that arrived is still noted on the card and logged verbatim to the debug console. A badge next to the panel heading names the current mode whenever the firmware reports one.
+
+A frame with no `mode:` suffix counts as active, since that firmware only ever scores IMU. (The original implementation set `anomalyActive = mode === 'imu'`, which greyed out the indicator permanently on firmware that never sends the suffix.)
+
+### Debug Console
+
+The **DBG** button at the bottom right opens a log of SPP traffic. Received telemetry is shown exactly as the board sent it, including the raw score and any `mode:` suffix, rather than as a summary rebuilt from parsed fields. Connection events, such as which board profile matched, appear as `INFO` lines.
 
 ## Browser Compatibility
 

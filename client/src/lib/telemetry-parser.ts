@@ -4,11 +4,15 @@
  * Parses telemetry messages from Silicon Labs motor control boards.
  *
  * Message format:
- * "Motor: <status>  Speed: <speed> Anomaly: <NORMAL|SLOWED|BLOCKED>\n"
+ * "Motor: <status>  Speed: <speed> Anomaly: <NORMAL|SLOWED|BLOCKED> [mode: <imu|audio>]\n"
  *
  * Firmware that reports a percentage ("Anomaly: 72%") is mapped to the same
  * three states, and the raw score is kept so the UI can show the meter. The
  * three-state format carries no number, so the score is null there.
+ *
+ * The optional `mode:` suffix names the sensor driving the edge model. Every
+ * frame keeps its original text in `raw` so the debug console can show exactly
+ * what the board sent rather than a re-rendered summary.
  *
  * BLE SPP notifies are often chunked (~20 bytes). Firmware may also abort a
  * multi-chunk send when a new command arrives, so the stream parser must
@@ -17,6 +21,9 @@
 
 export type AnomalyState = 'NORMAL' | 'SLOWED' | 'BLOCKED';
 
+/** Sensor the board is feeding the edge model, when it reports one. */
+export type DetectionMode = 'imu' | 'audio';
+
 export interface MotorTelemetry {
   status: 'Running' | 'Stop' | 'Error';
   speed: number; // rad/sec (signed from firmware; UI uses magnitude for RPM)
@@ -24,12 +31,25 @@ export interface MotorTelemetry {
   anomaly: AnomalyState;
   /** 0–100 confidence from the edge model, or null when firmware only reports a state. */
   anomalyScore: number | null;
+  /** null when the frame carries no `mode:` suffix. */
+  detectionMode: DetectionMode | null;
+  /** The frame exactly as it arrived, for the debug console. */
+  raw: string;
   timestamp: number;
+}
+
+/**
+ * The anomaly model scores IMU data. In audio mode it is not running, so any
+ * score in the frame is stale and must not be shown as a live reading.
+ * A frame with no `mode:` suffix comes from firmware that only ever scores IMU.
+ */
+export function isAnomalyDetectionActive(mode: DetectionMode | null): boolean {
+  return mode !== 'audio';
 }
 
 /** Complete telemetry frame with discrete anomaly state. */
 const TELEMETRY_STATE_FRAME_RE =
-  /Motor:\s*(Running|Stop|Error)\s+Speed:\s*([-+]?\d+(?:\.\d+)?)\s+Anomaly:\s*(NORMAL|SLOWED|BLOCKED)/i;
+  /Motor:\s*(Running|Stop|Error)\s+Speed:\s*([-+]?\d+(?:\.\d+)?)\s+Anomaly:\s*(NORMAL|SLOWED|BLOCKED)(?:\s+mode:\s*(imu|audio))?/i;
 
 /** Legacy percentage-based frames (pre–three-state BLE format). */
 const TELEMETRY_PERCENT_FRAME_RE =
@@ -57,11 +77,19 @@ function normalizeAnomalyState(raw: string): AnomalyState | null {
   return null;
 }
 
+function normalizeDetectionMode(raw: string | undefined): DetectionMode | null {
+  if (!raw) return null;
+  const lower = raw.trim().toLowerCase();
+  return lower === 'imu' || lower === 'audio' ? lower : null;
+}
+
 function buildTelemetry(
   status: 'Running' | 'Stop' | 'Error',
   speed: number,
   anomaly: AnomalyState,
-  anomalyScore: number | null
+  anomalyScore: number | null,
+  detectionMode: DetectionMode | null,
+  raw: string
 ): MotorTelemetry | null {
   if (!['Running', 'Stop', 'Error'].includes(status)) {
     console.warn('[Telemetry] Invalid status:', status);
@@ -82,6 +110,8 @@ function buildTelemetry(
     rpm,
     anomaly,
     anomalyScore,
+    detectionMode,
+    raw,
     timestamp: Date.now(),
   };
 }
@@ -101,7 +131,14 @@ export function parseTelemetry(message: string): MotorTelemetry | null {
       if (!anomaly) {
         return null;
       }
-      return buildTelemetry(status, speed, anomaly, null);
+      return buildTelemetry(
+        status,
+        speed,
+        anomaly,
+        null,
+        normalizeDetectionMode(stateMatch[4]),
+        line
+      );
     }
 
     const percentMatch = line.match(TELEMETRY_PERCENT_FRAME_RE);
@@ -117,7 +154,9 @@ export function parseTelemetry(message: string): MotorTelemetry | null {
         status,
         speed,
         percentToAnomalyState(anomalyPercentage),
-        anomalyPercentage
+        anomalyPercentage,
+        normalizeDetectionMode(percentMatch[4]),
+        line
       );
     }
 

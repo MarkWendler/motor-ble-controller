@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Bluetooth, AlertCircle, CheckCircle2, Zap, Power, Wifi } from 'lucide-react';
+import { Bluetooth, AlertCircle, AudioLines, CheckCircle2, Zap, Power, Wifi } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DebugConsole, type DebugMessage } from '@/components/DebugConsole';
 import { BLE_SERVICE_UUIDS, resolveBleProfile } from '@/lib/ble-profiles';
@@ -8,6 +8,7 @@ import {
   TelemetryStreamParser,
   type MotorTelemetry,
   anomalyLabel,
+  isAnomalyDetectionActive,
   ANOMALY_BLOCKED_SCORE,
   ANOMALY_SLOWED_SCORE,
 } from '@/lib/telemetry-parser';
@@ -83,6 +84,9 @@ const MOTOR_PRESET_MODES: MotorPresetMode[] = ['low', 'high'];
 /** How close reported speed must be to a preset for that button to light up. */
 const MOTOR_PRESET_MATCH_RAD_S = 5;
 
+/** Bar heights for the audio-mode level indicator, within an h-8 row. */
+const AUDIO_LEVEL_BARS = ['10px', '22px', '14px', '28px', '18px', '24px'];
+
 /* Meter bands reuse the parser's state thresholds so the score and the
  * NORMAL / SLOWED / BLOCKED readout can never contradict each other. */
 function anomalyScoreLabel(score: number): string {
@@ -135,6 +139,8 @@ export default function FanController() {
     rpm: 0,
     anomaly: 'NORMAL',
     anomalyScore: null,
+    detectionMode: null,
+    raw: '',
     timestamp: Date.now(),
   });
   const [connectionStatus, setConnectionStatus] = useState<string>('Disconnected');
@@ -247,6 +253,8 @@ export default function FanController() {
       rpm: 0,
       anomaly: 'NORMAL',
       anomalyScore: null,
+      detectionMode: null,
+      raw: '',
       timestamp: Date.now(),
     });
   };
@@ -353,6 +361,8 @@ export default function FanController() {
         rpm: 0,
         anomaly: 'NORMAL',
         anomalyScore: null,
+        detectionMode: null,
+        raw: '',
         timestamp: Date.now(),
       });
       if (fromWifi) {
@@ -486,11 +496,9 @@ export default function FanController() {
       applyTelemetry(telemetry);
     }
     if (telemetryFrames.length > 0) {
+      /* Log the frame verbatim — a re-rendered summary hides the score and mode. */
       for (const telemetry of telemetryFrames) {
-        addDebugMessage(
-          'received',
-          `Motor: ${telemetry.status}  Speed: ${telemetry.speed.toFixed(2)} Anomaly: ${telemetry.anomaly}`
-        );
+        addDebugMessage('received', telemetry.raw);
       }
     } else if (text.trim() && !/Motor:/i.test(text)) {
       addDebugMessage('received', text.trim());
@@ -1029,8 +1037,11 @@ export default function FanController() {
   const bleIconClass = bleLinkActive ? 'text-green-600' : 'text-muted-foreground/40';
   const wifiIconClass = wifiLinkActive ? 'text-green-600' : 'text-muted-foreground/40';
   const telemetrySource = transport === 'wifi' ? 'Wi-Fi' : 'BLE';
+  const detectionMode = telemetryLive ? motorState.detectionMode : null;
+  /** False only while the board streams audio, where the IMU model is not scoring. */
+  const detectionActive = isAnomalyDetectionActive(detectionMode);
   /** Null until a live frame carries a numeric score; the three-state format has none. */
-  const anomalyScore = telemetryLive ? motorState.anomalyScore : null;
+  const anomalyScore = telemetryLive && detectionActive ? motorState.anomalyScore : null;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-background via-secondary to-background">
@@ -1403,78 +1414,128 @@ export default function FanController() {
                 <div className="mb-4">
                   <div className="flex items-center justify-between mb-3">
                     <span className="text-sm font-medium text-muted-foreground">Anomaly Detection</span>
-                    <div
-                      className={`status-led ${
-                        !telemetryLive
-                          ? 'bg-muted'
-                          : motorState.anomaly === 'BLOCKED'
-                            ? 'bg-red-500 active'
-                            : motorState.anomaly === 'SLOWED'
-                              ? 'bg-yellow-500 active'
-                              : 'bg-green-500'
-                      }`}
-                    />
-                  </div>
-
-                  {/* Anomaly score meter — firmware that reports a percentage */}
-                  <div className="mb-3">
-                    <div className="flex items-end justify-between mb-2">
-                      <span
-                        className={`text-2xl font-mono font-bold ${
-                          anomalyScore === null ? 'text-muted-foreground' : 'text-foreground'
-                        }`}
-                      >
-                        {anomalyScore === null ? '—' : `${anomalyScore}%`}
-                      </span>
-                      <span className="text-xs font-medium text-muted-foreground">
-                        {anomalyScore === null
-                          ? telemetryLive
-                            ? 'Score not reported by this firmware'
-                            : 'Anomaly score'
-                          : anomalyScoreLabel(anomalyScore)}
-                      </span>
-                    </div>
-                    <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
+                    <div className="flex items-center gap-2">
+                      {detectionMode && (
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
+                            detectionActive
+                              ? 'bg-primary/10 text-primary'
+                              : 'bg-violet-100 text-violet-700'
+                          }`}
+                        >
+                          {detectionMode}
+                        </span>
+                      )}
                       <div
-                        className={`h-full transition-all duration-300 ${
-                          anomalyScore === null ? 'bg-transparent' : anomalyScoreBarClass(anomalyScore)
+                        className={`status-led ${
+                          !telemetryLive
+                            ? 'bg-muted'
+                            : !detectionActive
+                              ? 'bg-violet-500 active'
+                              : motorState.anomaly === 'BLOCKED'
+                                ? 'bg-red-500 active'
+                                : motorState.anomaly === 'SLOWED'
+                                  ? 'bg-yellow-500 active'
+                                  : 'bg-green-500'
                         }`}
-                        style={{ width: `${anomalyScore ?? 0}%` }}
                       />
                     </div>
                   </div>
 
-                  <div className="bg-secondary/50 rounded-lg p-4 mb-3">
-                    <p
-                      className={`text-2xl font-bold tracking-wide ${
-                        !telemetryLive
-                          ? 'text-muted-foreground'
-                          : motorState.anomaly === 'BLOCKED'
-                            ? 'text-red-600'
-                            : motorState.anomaly === 'SLOWED'
-                              ? 'text-yellow-600'
-                              : 'text-green-600'
-                      }`}
-                    >
-                      {telemetryLive ? motorState.anomaly : '—'}
-                    </p>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      {!telemetryLive
-                        ? 'Pending telemetry'
-                        : anomalyLabel(motorState.anomaly)}
-                    </p>
-                  </div>
+                  {!detectionActive ? (
+                    /* Audio mode: the IMU model is not scoring, so show that plainly
+                       instead of a number that would look like a live reading. */
+                    <div className="rounded-lg border border-violet-200 bg-violet-50 p-4 mb-3">
+                      <div className="flex items-center gap-3">
+                        <AudioLines className="w-6 h-6 shrink-0 text-violet-600" />
+                        <div className="flex h-8 items-end gap-1" aria-hidden="true">
+                          {AUDIO_LEVEL_BARS.map((height, index) => (
+                            <span
+                              key={index}
+                              className="w-1.5 animate-pulse rounded-full bg-violet-400"
+                              style={{ height, animationDelay: `${index * 120}ms` }}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                      <p className="mt-3 text-base font-bold text-violet-900">
+                        Scoring paused — audio mode
+                      </p>
+                      <p className="mt-1 text-xs text-violet-800">
+                        The board is streaming audio. The edge model scores IMU data, so no
+                        anomaly score is produced while audio is active.
+                      </p>
+                      {motorState.anomalyScore !== null && (
+                        <p className="mt-2 font-mono text-xs text-violet-700/80">
+                          Last frame carried {motorState.anomalyScore}% — not evaluated.
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <>
+                      {/* Anomaly score meter — firmware that reports a percentage */}
+                      <div className="mb-3">
+                        <div className="flex items-end justify-between mb-2">
+                          <span
+                            className={`text-2xl font-mono font-bold ${
+                              anomalyScore === null ? 'text-muted-foreground' : 'text-foreground'
+                            }`}
+                          >
+                            {anomalyScore === null ? '—' : `${anomalyScore}%`}
+                          </span>
+                          <span className="text-xs font-medium text-muted-foreground">
+                            {anomalyScore === null
+                              ? telemetryLive
+                                ? 'Score not reported by this firmware'
+                                : 'Anomaly score'
+                              : anomalyScoreLabel(anomalyScore)}
+                          </span>
+                        </div>
+                        <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full transition-all duration-300 ${
+                              anomalyScore === null
+                                ? 'bg-transparent'
+                                : anomalyScoreBarClass(anomalyScore)
+                            }`}
+                            style={{ width: `${anomalyScore ?? 0}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="bg-secondary/50 rounded-lg p-4 mb-3">
+                        <p
+                          className={`text-2xl font-bold tracking-wide ${
+                            !telemetryLive
+                              ? 'text-muted-foreground'
+                              : motorState.anomaly === 'BLOCKED'
+                                ? 'text-red-600'
+                                : motorState.anomaly === 'SLOWED'
+                                  ? 'text-yellow-600'
+                                  : 'text-green-600'
+                          }`}
+                        >
+                          {telemetryLive ? motorState.anomaly : '—'}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          {!telemetryLive ? 'Pending telemetry' : anomalyLabel(motorState.anomaly)}
+                        </p>
+                      </div>
+                    </>
+                  )}
 
                   <p className="text-xs text-muted-foreground">
-                    {!telemetryLive
-                      ? transport === 'wifi'
-                        ? 'Telemetry starts when Wi-Fi delivers Motor: frames'
-                        : 'Telemetry starts when BLE notifications deliver Motor: frames'
-                      : motorState.anomaly === 'NORMAL'
-                        ? '✓ Normal Operation'
-                        : motorState.anomaly === 'SLOWED'
-                          ? '⚠️ Fan running slower than expected'
-                          : '⛔ Fan blocked or stalled'}
+                    {!detectionActive
+                      ? '🎙 Switch the board back to IMU mode to resume anomaly scoring'
+                      : !telemetryLive
+                        ? transport === 'wifi'
+                          ? 'Telemetry starts when Wi-Fi delivers Motor: frames'
+                          : 'Telemetry starts when BLE notifications deliver Motor: frames'
+                        : motorState.anomaly === 'NORMAL'
+                          ? '✓ Normal Operation'
+                          : motorState.anomaly === 'SLOWED'
+                            ? '⚠️ Fan running slower than expected'
+                            : '⛔ Fan blocked or stalled'}
                   </p>
                 </div>
 

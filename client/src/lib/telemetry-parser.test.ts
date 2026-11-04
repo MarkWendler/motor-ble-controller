@@ -3,6 +3,7 @@ import {
   ANOMALY_BLOCKED_SCORE,
   ANOMALY_SLOWED_SCORE,
   TelemetryStreamParser,
+  isAnomalyDetectionActive,
   parseTelemetry,
   percentToAnomalyState,
 } from './telemetry-parser';
@@ -49,6 +50,47 @@ describe('percentToAnomalyState', () => {
     expect(percentToAnomalyState(ANOMALY_SLOWED_SCORE)).toBe('SLOWED');
     expect(percentToAnomalyState(ANOMALY_BLOCKED_SCORE - 1)).toBe('SLOWED');
     expect(percentToAnomalyState(ANOMALY_BLOCKED_SCORE)).toBe('BLOCKED');
+  });
+});
+
+describe('detection mode', () => {
+  it('reads the mode from a percentage frame', () => {
+    expect(parseTelemetry('Motor: Running  Speed: 30.00 Anomaly: 12% mode: imu')?.detectionMode)
+      .toBe('imu');
+    expect(parseTelemetry('Motor: Running  Speed: 30.00 Anomaly: 12% mode: audio')?.detectionMode)
+      .toBe('audio');
+  });
+
+  it('reads the mode from a three-state frame', () => {
+    expect(parseTelemetry('Motor: Running  Speed: 30.00 Anomaly: NORMAL mode: audio')?.detectionMode)
+      .toBe('audio');
+  });
+
+  it('reports no mode when the frame omits the suffix', () => {
+    expect(parseTelemetry('Motor: Running  Speed: 30.00 Anomaly: 12%')?.detectionMode).toBeNull();
+  });
+
+  it('treats scoring as active unless the board is on audio', () => {
+    expect(isAnomalyDetectionActive('imu')).toBe(true);
+    expect(isAnomalyDetectionActive('audio')).toBe(false);
+    // Firmware that never names a mode only ever scores IMU.
+    expect(isAnomalyDetectionActive(null)).toBe(true);
+  });
+});
+
+describe('raw frame text', () => {
+  it('keeps the percentage and mode exactly as received', () => {
+    const line = 'Motor: Running  Speed: 29.81 Anomaly: 72% mode: audio';
+
+    expect(parseTelemetry(line)?.raw).toBe(line);
+  });
+
+  it('keeps the raw text of a frame reassembled from chunks', () => {
+    const parser = new TelemetryStreamParser();
+    parser.feed('Motor: Running  Speed: 30.00 Anom');
+    const frames = parser.feed('aly: 64% mode: imu\n');
+
+    expect(frames[0].raw).toBe('Motor: Running  Speed: 30.00 Anomaly: 64% mode: imu');
   });
 });
 
