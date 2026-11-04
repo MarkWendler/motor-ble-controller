@@ -10,15 +10,19 @@ This demo is designed for exhibition environments, showcasing how the xG24 platf
 
 ## Features
 
-### Three-Mode Motor Control
-- **Stop Mode (M0):** Stops the motor completely
-- **Low Mode (M10):** Runs motor at 10 rad/sec (~95 RPM)
-- **High Mode (M20):** Runs motor at 20 rad/sec (~191 RPM)
+### Motor Control
+- **Stop (M0):** Stops the motor completely
+- **Low (M30):** Runs motor at 30 rad/sec (~287 RPM)
+- **High (M50):** Runs motor at 50 rad/sec (~477 RPM)
+- **Custom:** Any setpoint from -300 to 300 rad/sec (negative runs in reverse)
+- **Auto-Shutoff:** Lets the firmware stop the motor by itself on a sustained anomaly
+
+The two presets are defined by `MOTOR_PRESET_RAD_S` in `client/src/pages/FanController.tsx`; the button labels are generated from it, so changing a setpoint cannot leave a stale label behind.
 
 ### Real-Time Telemetry Display
 - **Motor Status:** Running, Stop, or Error states with LED indicator
 - **Speed Display:** Shows both RPM and rad/sec in real-time
-- **Anomaly Detection:** AI/ML-based anomaly detection with visual indicator
+- **Anomaly Detection:** AI/ML anomaly state, plus the 0–100 score and meter when the firmware reports one
 - **Connection Status:** Live Bluetooth connection indicator
 
 ### Modern Technical Design
@@ -88,22 +92,27 @@ This demo is designed for exhibition environments, showcasing how the xG24 platf
 ### Command Format
 Commands are sent to the motor control board as simple text strings:
 - `M0` - Stop motor
-- `M10` - Set speed to 10 rad/sec
-- `M20` - Set speed to 20 rad/sec
+- `M30` - Set speed to 30 rad/sec (Low preset)
+- `M50` - Set speed to 50 rad/sec (High preset)
+- `M<n>` - Any setpoint in -300..300 rad/sec; negative runs in reverse
+- `AOFF1` / `AOFF0` - Enable / disable firmware auto-shutoff
 
 Each command is terminated with a newline character (`\n`).
 
 ### Feedback Format
-The motor control board sends feedback approximately every 500ms (2 Hz) in the following format:
+The motor control board sends feedback approximately every 500ms (2 Hz). Two formats are accepted, and the UI adapts to whichever the board sends:
+
 ```
-Motor: <status>  Speed: <speed_value>
+Motor: <status>  Speed: <speed_value> Anomaly: <score>%
+Motor: <status>  Speed: <speed_value> Anomaly: <NORMAL|SLOWED|BLOCKED>
 ```
 
 **Example:**
 ```
-Motor: Running  Speed: 19.87
-Motor: Stop  Speed: 0.00
-Motor: Error  Speed: 0.00
+Motor: Running  Speed: 29.87 Anomaly: 12%
+Motor: Running  Speed: 49.50 Anomaly: 95% mode: audio
+Motor: Running  Speed: 49.72 Anomaly: SLOWED
+Motor: Stop  Speed: 0.00 Anomaly: 0%
 ```
 
 **Status Values:**
@@ -113,16 +122,23 @@ Motor: Error  Speed: 0.00
 
 **Speed Value:**
 - Floating-point number representing current speed in rad/sec
-- Range: 0.00 to 25.00 (with tolerance)
+- Signed, with a valid magnitude up to 300
 
 ## Anomaly Detection
 
-The application includes built-in anomaly detection that monitors:
-- **Status/Mode Mismatch:** Motor status doesn't match the requested mode
-- **Speed Out of Range:** Actual speed exceeds expected range for the mode
-- **Error State:** Motor reports error condition
+The edge model on the board reports how far the fan has drifted from normal running. Boards that send a numeric score drive the percentage readout and meter bar; boards that send only a state drive the state readout, and the meter shows a dash rather than a fabricated number.
 
-When an anomaly is detected, the Anomaly Detection indicator turns amber and pulses to alert the operator.
+The score is mapped to a state at fixed thresholds (`ANOMALY_SLOWED_SCORE` and `ANOMALY_BLOCKED_SCORE` in `client/src/lib/telemetry-parser.ts`):
+
+| Score | State | Meter |
+| --- | --- | --- |
+| 0–39 | `NORMAL` | green, "Normal" |
+| 40–79 | `SLOWED` | amber, "Warning" |
+| 80–100 | `BLOCKED` | red, "Critical" |
+
+The meter bands read from those same constants, so the percentage and the state readout can never disagree.
+
+With **Auto-Shutoff** enabled (`AOFF1`), the firmware stops the motor itself once an anomaly persists, rather than relying on the operator. The toggle reflects what the app last sent; it resets to off on disconnect, matching the firmware default.
 
 ## Browser Compatibility
 

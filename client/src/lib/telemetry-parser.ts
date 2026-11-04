@@ -6,8 +6,9 @@
  * Message format:
  * "Motor: <status>  Speed: <speed> Anomaly: <NORMAL|SLOWED|BLOCKED>\n"
  *
- * Legacy firmware may still send percentage values (0/60/90); those are mapped
- * to the same three states for backward compatibility.
+ * Firmware that reports a percentage ("Anomaly: 72%") is mapped to the same
+ * three states, and the raw score is kept so the UI can show the meter. The
+ * three-state format carries no number, so the score is null there.
  *
  * BLE SPP notifies are often chunked (~20 bytes). Firmware may also abort a
  * multi-chunk send when a new command arrives, so the stream parser must
@@ -21,6 +22,8 @@ export interface MotorTelemetry {
   speed: number; // rad/sec (signed from firmware; UI uses magnitude for RPM)
   rpm: number; // calculated from |speed|
   anomaly: AnomalyState;
+  /** 0–100 confidence from the edge model, or null when firmware only reports a state. */
+  anomalyScore: number | null;
   timestamp: number;
 }
 
@@ -32,11 +35,15 @@ const TELEMETRY_STATE_FRAME_RE =
 const TELEMETRY_PERCENT_FRAME_RE =
   /Motor:\s*(Running|Stop|Error)\s+Speed:\s*([-+]?\d+(?:\.\d+)?)\s+Anomaly:\s*(\d+)\s*%(?:\s+mode:\s*(imu|audio))?/i;
 
+/** Score at or above which the fan counts as slowed, then as blocked. */
+export const ANOMALY_SLOWED_SCORE = 40;
+export const ANOMALY_BLOCKED_SCORE = 80;
+
 export function percentToAnomalyState(percent: number): AnomalyState {
-  if (percent >= 80) {
+  if (percent >= ANOMALY_BLOCKED_SCORE) {
     return 'BLOCKED';
   }
-  if (percent >= 40) {
+  if (percent >= ANOMALY_SLOWED_SCORE) {
     return 'SLOWED';
   }
   return 'NORMAL';
@@ -53,7 +60,8 @@ function normalizeAnomalyState(raw: string): AnomalyState | null {
 function buildTelemetry(
   status: 'Running' | 'Stop' | 'Error',
   speed: number,
-  anomaly: AnomalyState
+  anomaly: AnomalyState,
+  anomalyScore: number | null
 ): MotorTelemetry | null {
   if (!['Running', 'Stop', 'Error'].includes(status)) {
     console.warn('[Telemetry] Invalid status:', status);
@@ -73,6 +81,7 @@ function buildTelemetry(
     speed,
     rpm,
     anomaly,
+    anomalyScore,
     timestamp: Date.now(),
   };
 }
@@ -92,7 +101,7 @@ export function parseTelemetry(message: string): MotorTelemetry | null {
       if (!anomaly) {
         return null;
       }
-      return buildTelemetry(status, speed, anomaly);
+      return buildTelemetry(status, speed, anomaly, null);
     }
 
     const percentMatch = line.match(TELEMETRY_PERCENT_FRAME_RE);
@@ -104,7 +113,12 @@ export function parseTelemetry(message: string): MotorTelemetry | null {
         console.warn('[Telemetry] Invalid anomaly percentage:', anomalyPercentage);
         return null;
       }
-      return buildTelemetry(status, speed, percentToAnomalyState(anomalyPercentage));
+      return buildTelemetry(
+        status,
+        speed,
+        percentToAnomalyState(anomalyPercentage),
+        anomalyPercentage
+      );
     }
 
     console.warn('[Telemetry] Message does not match expected format:', line);
