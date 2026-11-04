@@ -1118,7 +1118,7 @@ export default function FanController() {
                   {!connected ? (
                     <>
                       <Button
-                        onClick={connectBluetooth}
+                        onClick={() => connectBluetooth()}
                         disabled={!bluetoothSupported || switching}
                         className="w-full tech-button bg-accent hover:bg-accent/90 text-accent-foreground"
                       >
