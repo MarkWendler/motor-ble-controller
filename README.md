@@ -35,8 +35,9 @@ This demo is designed for exhibition environments, showcasing how the xG24 platf
 
 ## Hardware Requirements
 
-- Silicon Labs MG24 development board or Arduino nano Matter  with motor control firmware
-- Motor control board running SPP firmware example
+- One of the supported boards running the motor control firmware:
+  - Silicon Labs MG24 development board or Arduino Nano Matter (SPP firmware example)
+  - Silicon Labs SiWG917 board (predictive-maintenance firmware, adds Wi-Fi)
 - Device with Bluetooth 5.0+ and Web Bluetooth API support
 - USB power for the motor control board
 
@@ -166,14 +167,28 @@ When an anomaly is detected, the Anomaly Detection indicator turns amber and pul
 | Device not appearing in scan | Check motor board is powered and in pairing mode |
 | Commands not sending | Verify Bluetooth connection is active (green indicator) |
 | No feedback received | Check motor board firmware is running SPP example |
+| "No supported SPP service on this device" | The board exposes an unknown GATT service UUID. The error lists what was found — add it as a profile in `client/src/lib/ble-profiles.ts` |
 | Anomaly keeps triggering | Verify motor board is responding with correct speed values |
 
 ## Technical Implementation Details
 
 ### Web Bluetooth SPP Connection
-The application uses the Web Bluetooth API to establish a connection to the SPP (Serial Port Profile) service:
-- **Service UUID:** `4880c12c-fdcb-4077-8920-a450d7f9b907` (Custom SPP Service)
-- **Characteristic UUID:** `fec26ec4-6d71-4442-9f81-55bc21d658d6` (Custom SPP Data)
+The application uses the Web Bluetooth API to establish a connection to the SPP (Serial Port Profile) service. Both supported firmware generations advertise the same service UUID:
+
+- **Advertised Service UUID:** `4880c12c-fdcb-4077-8920-a450d7f9b907` (Custom SPP Service)
+
+They differ in the UUIDs their GATT tables expose, so the board is identified after connecting rather than from the advertisement:
+
+| Board | GATT Service UUID | GATT Characteristic UUID |
+| --- | --- | --- |
+| MG24 / Arduino Nano Matter | `4880c12c-fdcb-4077-8920-a450d7f9b907` | `fec26ec4-6d71-4442-9f81-55bc21d658d6` |
+| SiWG917 predictive maintenance | `4880c12c-fdcb-4077-2089-50a407b9f9d7` | `fec26ec4-6d71-4442-819f-bc55d658d621` |
+
+The SiWG917 firmware builds its GATT table from Si91x `uuid_t` byte arrays whose ordering does not round-trip through Chrome, which is why the same firmware constants surface with the trailing groups byte-swapped.
+
+After the GATT connection is up, `resolveBleProfile()` in `client/src/lib/ble-profiles.ts` enumerates the services the board actually exposes and matches them against the table above. It deliberately avoids requesting a UUID the board does not have, because such a lookup stalls BlueZ ATT for roughly 30 seconds and delays telemetry. The matched board is logged to the in-app debug console (the **DBG** button, bottom right).
+
+Wi-Fi commands only exist in the SiWG917 firmware. On an MG24 board the Wi-Fi UI is hidden and no Wi-Fi probe is sent.
 
 ### Message Parsing
 Incoming feedback is buffered and parsed line-by-line using regex patterns to extract:
