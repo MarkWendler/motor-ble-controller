@@ -1,10 +1,17 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Bluetooth, AlertCircle, CheckCircle2, Zap, Power, Wifi } from 'lucide-react';
+import { Bluetooth, AlertCircle, AudioLines, CheckCircle2, Zap, Power, Wifi } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DebugConsole, type DebugMessage } from '@/components/DebugConsole';
-import { BLE_PROFILES, BLE_SERVICE_UUIDS } from '@/lib/ble-profiles';
+import { BLE_SERVICE_UUIDS, resolveBleProfile } from '@/lib/ble-profiles';
 import { writeBleCharacteristicChunked } from '@/lib/ble-write';
-import { TelemetryStreamParser, type MotorTelemetry, anomalyLabel } from '@/lib/telemetry-parser';
+import {
+  TelemetryStreamParser,
+  type MotorTelemetry,
+  anomalyLabel,
+  isAnomalyDetectionActive,
+  ANOMALY_BLOCKED_SCORE,
+  ANOMALY_SLOWED_SCORE,
+} from '@/lib/telemetry-parser';
 import type { TransportKind } from '@/lib/transport/types';
 import { WifiHttpTransport } from '@/lib/wifi-transport';
 import { parseWifiStatusLine, type WifiDeviceStatus } from '@/lib/wifi-status';
@@ -35,8 +42,10 @@ declare global {
     connect(): Promise<BluetoothRemoteGATTServer>;
     disconnect(): void;
     getPrimaryService(service: string): Promise<BluetoothRemoteGATTService>;
+    getPrimaryServices(service?: string): Promise<BluetoothRemoteGATTService[]>;
   }
   interface BluetoothRemoteGATTService {
+    uuid: string;
     getCharacteristic(characteristic: string): Promise<BluetoothRemoteGATTCharacteristic>;
   }
   interface BluetoothRemoteGATTCharacteristic {
@@ -56,11 +65,41 @@ declare global {
   }
 }
 
-type MotorMode = 'stop' | 'default' | 'fast' | 'custom';
+type MotorMode = 'stop' | 'low' | 'high' | 'custom';
 
 /** Firmware accepts motor speed refs in -300..300 rad/s (legacy BLE: M<n>, M0 = stop; negative = reverse). */
 const MOTOR_SPEED_MIN_RAD_S = -300;
 const MOTOR_SPEED_MAX_RAD_S = 300;
+
+type MotorPresetMode = 'low' | 'high';
+
+/** Preset setpoints in rad/s. Button labels read from here so they cannot drift from the command. */
+const MOTOR_PRESET_RAD_S: Record<MotorPresetMode, number> = {
+  low: 30,
+  high: 50,
+};
+
+const MOTOR_PRESET_MODES: MotorPresetMode[] = ['low', 'high'];
+
+/** How close reported speed must be to a preset for that button to light up. */
+const MOTOR_PRESET_MATCH_RAD_S = 5;
+
+/** Bar heights for the audio-mode level indicator, within an h-8 row. */
+const AUDIO_LEVEL_BARS = ['10px', '22px', '14px', '28px', '18px', '24px'];
+
+/* Meter bands reuse the parser's state thresholds so the score and the
+ * NORMAL / SLOWED / BLOCKED readout can never contradict each other. */
+function anomalyScoreLabel(score: number): string {
+  if (score >= ANOMALY_BLOCKED_SCORE) return 'Critical';
+  if (score >= ANOMALY_SLOWED_SCORE) return 'Warning';
+  return 'Normal';
+}
+
+function anomalyScoreBarClass(score: number): string {
+  if (score >= ANOMALY_BLOCKED_SCORE) return 'bg-red-500';
+  if (score >= ANOMALY_SLOWED_SCORE) return 'bg-yellow-500';
+  return 'bg-green-500';
+}
 
 /** How long transient error banners stay visible before auto-dismiss. */
 const ERROR_DISMISS_MS = 5000;
@@ -92,11 +131,16 @@ export default function FanController() {
   const [wifiUseStored, setWifiUseStored] = useState(true);
   const [storedNetworks, setStoredNetworks] = useState(() => loadStoredWifiNetworks());
   const [currentMode, setCurrentMode] = useState<MotorMode>('stop');
+  /** Mirrors the device's AOFF flag; reset on disconnect since firmware defaults to off. */
+  const [autoShutoffEnabled, setAutoShutoffEnabled] = useState(false);
   const [motorState, setMotorState] = useState<MotorTelemetry>({
     status: 'Stop',
     speed: 0,
     rpm: 0,
     anomaly: 'NORMAL',
+    anomalyScore: null,
+    detectionMode: null,
+    raw: '',
     timestamp: Date.now(),
   });
   const [connectionStatus, setConnectionStatus] = useState<string>('Disconnected');
@@ -166,7 +210,7 @@ export default function FanController() {
   /**
    * Add a message to the debug console
    */
-  const addDebugMessage = (type: 'sent' | 'received', data: string, raw?: Uint8Array) => {
+  const addDebugMessage = (type: DebugMessage['type'], data: string, raw?: Uint8Array) => {
     const message: DebugMessage = {
       id: `msg-${debugMessageIdRef.current++}`,
       timestamp: Date.now(),
@@ -186,43 +230,6 @@ export default function FanController() {
   };
 
   /**
-   * Resolve the PM firmware GATT service.
-   * Probe only the UUID that exists on the device — a missing UUID stalls BlueZ ~30s.
-   */
-  const resolveBleProfile = async (server: BluetoothRemoteGATTServer) => {
-    const withTimeout = <T,>(promise: Promise<T>, ms: number, label: string): Promise<T> =>
-      new Promise<T>((resolve, reject) => {
-        const timer = window.setTimeout(() => {
-          reject(new Error(`${label} timed out after ${ms}ms`));
-        }, ms);
-        promise.then(
-          (value) => {
-            window.clearTimeout(timer);
-            resolve(value);
-          },
-          (err) => {
-            window.clearTimeout(timer);
-            reject(err);
-          }
-        );
-      });
-
-    const profile = BLE_PROFILES[0];
-    setConnectionStatus('Discovering services…');
-    const service = await withTimeout(
-      server.getPrimaryService(profile.serviceUuid),
-      5000,
-      'SPP service'
-    );
-    const characteristic = await withTimeout(
-      service.getCharacteristic(profile.characteristicUuid),
-      5000,
-      'SPP characteristic'
-    );
-    return { profile, characteristic };
-  };
-
-  /**
    * Reset UI / refs after the BLE link is gone.
    */
   const clearConnectionState = () => {
@@ -238,12 +245,16 @@ export default function FanController() {
     setDeviceWifiUp(false);
     setConnectionStatus('Disconnected');
     setCurrentMode('stop');
+    setAutoShutoffEnabled(false);
     setTelemetryLive(false);
     setMotorState({
       status: 'Stop',
       speed: 0,
       rpm: 0,
       anomaly: 'NORMAL',
+      anomalyScore: null,
+      detectionMode: null,
+      raw: '',
       timestamp: Date.now(),
     });
   };
@@ -294,7 +305,9 @@ export default function FanController() {
        * CCCD / startNotifications or the link hits supervision timeout (0x4e08).
        */
       await new Promise((resolve) => window.setTimeout(resolve, fromWifi ? 400 : 50));
-      const { characteristic } = await resolveBleProfile(server);
+      setConnectionStatus('Discovering services…');
+      const { profile, characteristic } = await resolveBleProfile(server);
+      addDebugMessage('info', `Matched ${profile.label} firmware (service ${profile.serviceUuid})`);
 
       deviceRef.current = device;
       device.addEventListener('gattserverdisconnected', gattDisconnectedListener);
@@ -341,15 +354,23 @@ export default function FanController() {
       setTransport('ble');
       setConnectionStatus('Connected via BLE');
       setCurrentMode('stop');
+      setAutoShutoffEnabled(false);
       setMotorState({
         status: 'Stop',
         speed: 0,
         rpm: 0,
         anomaly: 'NORMAL',
+        anomalyScore: null,
+        detectionMode: null,
+        raw: '',
         timestamp: Date.now(),
       });
       if (fromWifi) {
         setWifiSupported(true);
+      } else if (!profile.supportsWifi) {
+        /* This firmware has no `wifi` command at all — skip the probe instead of
+         * sending the board a command it can only reject. */
+        setWifiSupported(false);
       } else {
         /*
          * Defer capability probe until after CCCD settle. Immediate wifi status
@@ -427,13 +448,13 @@ export default function FanController() {
     const absSpeed = Math.abs(telemetry.speed);
     if (telemetry.status === 'Stop' || absSpeed < 1) {
       setCurrentMode('stop');
-    } else if (Math.abs(absSpeed - 100) <= 5) {
-      setCurrentMode('default');
-    } else if (Math.abs(absSpeed - 250) <= 5) {
-      setCurrentMode('fast');
-    } else {
-      setCurrentMode('custom');
+      return;
     }
+
+    const preset = MOTOR_PRESET_MODES.find(
+      (mode) => Math.abs(absSpeed - MOTOR_PRESET_RAD_S[mode]) <= MOTOR_PRESET_MATCH_RAD_S
+    );
+    setCurrentMode(preset ?? 'custom');
   };
 
   /**
@@ -475,11 +496,9 @@ export default function FanController() {
       applyTelemetry(telemetry);
     }
     if (telemetryFrames.length > 0) {
+      /* Log the frame verbatim — a re-rendered summary hides the score and mode. */
       for (const telemetry of telemetryFrames) {
-        addDebugMessage(
-          'received',
-          `Motor: ${telemetry.status}  Speed: ${telemetry.speed.toFixed(2)} Anomaly: ${telemetry.anomaly}`
-        );
+        addDebugMessage('received', telemetry.raw);
       }
     } else if (text.trim() && !/Motor:/i.test(text)) {
       addDebugMessage('received', text.trim());
@@ -589,19 +608,21 @@ export default function FanController() {
   /**
    * Send command to motor control board (active transport).
    */
-  const sendCommand = async (command: string) => {
+  /** @returns true when the command reached the device. */
+  const sendCommand = async (command: string): Promise<boolean> => {
     if (!connected) {
       showError('Not connected to device');
-      return;
+      return false;
     }
 
     try {
       if (transportRef.current === 'wifi' && wifiTransportRef.current) {
         addDebugMessage('sent', command);
         await wifiTransportRef.current.send(command);
-        return;
+        return true;
       }
       await sendBleRaw(command);
+      return true;
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to send command';
       showError(errorMsg);
@@ -610,6 +631,7 @@ export default function FanController() {
         setConnectionStatus('Disconnected');
         characteristicRef.current = null;
       }
+      return false;
     }
   };
 
@@ -877,19 +899,7 @@ export default function FanController() {
    * Real-Time Telemetry is updated solely from BLE notifications after connect.
    */
   const setMotorMode = async (mode: Exclude<MotorMode, 'custom'>) => {
-    let command = '';
-
-    switch (mode) {
-      case 'stop':
-        command = 'M0';
-        break;
-      case 'default':
-        command = 'M100';
-        break;
-      case 'fast':
-        command = 'M250';
-        break;
-    }
+    const command = mode === 'stop' ? 'M0' : `M${MOTOR_PRESET_RAD_S[mode]}`;
 
     // Highlight the pressed control; telemetry panel follows device notify stream.
     setCurrentMode(mode);
@@ -917,6 +927,21 @@ export default function FanController() {
     clearError();
     setCurrentMode(speed === 0 ? 'stop' : 'custom');
     await sendCommand(`M${speed}`);
+  };
+
+  /**
+   * Toggle the firmware's auto-shutoff guard (AOFF1 / AOFF0), which stops the
+   * motor by itself once the edge model reports a sustained anomaly.
+   */
+  const toggleAutoShutoff = async () => {
+    const next = !autoShutoffEnabled;
+    clearError();
+    /* Show the intent immediately, then fall back if the write did not land. */
+    setAutoShutoffEnabled(next);
+    const sent = await sendCommand(next ? 'AOFF1' : 'AOFF0');
+    if (!sent) {
+      setAutoShutoffEnabled(!next);
+    }
   };
 
   /** Drop browser-cached SSIDs/IPs so the Switch-to-Wi-Fi dialog stays in sync with device NVM. */
@@ -1012,6 +1037,11 @@ export default function FanController() {
   const bleIconClass = bleLinkActive ? 'text-green-600' : 'text-muted-foreground/40';
   const wifiIconClass = wifiLinkActive ? 'text-green-600' : 'text-muted-foreground/40';
   const telemetrySource = transport === 'wifi' ? 'Wi-Fi' : 'BLE';
+  const detectionMode = telemetryLive ? motorState.detectionMode : null;
+  /** False only while the board streams audio, where the IMU model is not scoring. */
+  const detectionActive = isAnomalyDetectionActive(detectionMode);
+  /** Null until a live frame carries a numeric score; the three-state format has none. */
+  const anomalyScore = telemetryLive && detectionActive ? motorState.anomalyScore : null;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-background via-secondary to-background">
@@ -1118,7 +1148,7 @@ export default function FanController() {
                   {!connected ? (
                     <>
                       <Button
-                        onClick={connectBluetooth}
+                        onClick={() => connectBluetooth()}
                         disabled={!bluetoothSupported || switching}
                         className="w-full tech-button bg-accent hover:bg-accent/90 text-accent-foreground"
                       >
@@ -1219,30 +1249,30 @@ export default function FanController() {
                     <span className="text-lg">⏹</span> Stop
                   </button>
 
-                  {/* Default Speed Button */}
+                  {/* Low Speed Button */}
                   <button
-                    onClick={() => setMotorMode('default')}
+                    onClick={() => setMotorMode('low')}
                     disabled={!connected}
                     className={`w-full tech-button py-4 rounded-xl font-semibold transition-all ${
-                      currentMode === 'default'
+                      currentMode === 'low'
                         ? 'bg-green-500 text-green-foreground shadow-lg'
                         : 'bg-green-100 text-green-700 hover:bg-green-200'
                     } disabled:opacity-50 disabled:cursor-not-allowed`}
                   >
-                    <span className="text-lg">🌀</span> Default (100 rad/s)
+                    <span className="text-lg">🌀</span> Low ({MOTOR_PRESET_RAD_S.low} rad/s)
                   </button>
 
-                  {/* Fast Speed Button */}
+                  {/* High Speed Button */}
                   <button
-                    onClick={() => setMotorMode('fast')}
+                    onClick={() => setMotorMode('high')}
                     disabled={!connected}
                     className={`w-full tech-button py-4 rounded-xl font-semibold transition-all ${
-                      currentMode === 'fast'
+                      currentMode === 'high'
                         ? 'bg-accent text-accent-foreground shadow-lg'
                         : 'bg-accent/10 text-accent hover:bg-accent/20'
                     } disabled:opacity-50 disabled:cursor-not-allowed`}
                   >
-                    <span className="text-lg">⚡</span> Fast (250 rad/s)
+                    <span className="text-lg">⚡</span> High ({MOTOR_PRESET_RAD_S.high} rad/s)
                   </button>
 
                   {/* Custom Speed */}
@@ -1292,8 +1322,8 @@ export default function FanController() {
                   </div>
                 </div>
 
-                {/* Auto-Shutoff Toggle — UI retained; feature not on device yet */}
-                <div className="mt-8 pt-8 border-t border-border opacity-70">
+                {/* Auto-Shutoff Toggle */}
+                <div className="mt-8 pt-8 border-t border-border">
                   <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-2">
                       <Power className="w-5 h-5 text-primary" />
@@ -1301,16 +1331,28 @@ export default function FanController() {
                     </div>
                     <button
                       type="button"
-                      disabled
-                      aria-disabled="true"
-                      title="Not available on device yet"
-                      className="relative inline-flex h-8 w-14 cursor-not-allowed items-center rounded-full bg-gray-300 opacity-60"
+                      role="switch"
+                      aria-checked={autoShutoffEnabled}
+                      aria-label="Auto-shutoff on sustained anomaly"
+                      onClick={() => void toggleAutoShutoff()}
+                      disabled={!connected}
+                      className={`relative inline-flex h-8 w-14 items-center rounded-full transition-colors ${
+                        autoShutoffEnabled ? 'bg-accent' : 'bg-gray-300'
+                      } disabled:cursor-not-allowed disabled:opacity-50`}
                     >
-                      <span className="inline-block h-6 w-6 translate-x-1 transform rounded-full bg-white" />
+                      <span
+                        className={`inline-block h-6 w-6 transform rounded-full bg-white transition-transform ${
+                          autoShutoffEnabled ? 'translate-x-7' : 'translate-x-1'
+                        }`}
+                      />
                     </button>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    Auto-shutoff disabled — not available on device yet
+                    {!connected
+                      ? 'Connect to control auto-shutoff'
+                      : autoShutoffEnabled
+                        ? 'Auto-shutoff enabled — the motor stops itself on a sustained anomaly'
+                        : 'Auto-shutoff disabled — the motor keeps running through anomalies'}
                   </p>
                 </div>
               </div>
@@ -1372,50 +1414,128 @@ export default function FanController() {
                 <div className="mb-4">
                   <div className="flex items-center justify-between mb-3">
                     <span className="text-sm font-medium text-muted-foreground">Anomaly Detection</span>
-                    <div
-                      className={`status-led ${
-                        !telemetryLive
-                          ? 'bg-muted'
-                          : motorState.anomaly === 'BLOCKED'
-                            ? 'bg-red-500 active'
-                            : motorState.anomaly === 'SLOWED'
-                              ? 'bg-yellow-500 active'
-                              : 'bg-green-500'
-                      }`}
-                    />
+                    <div className="flex items-center gap-2">
+                      {detectionMode && (
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
+                            detectionActive
+                              ? 'bg-primary/10 text-primary'
+                              : 'bg-violet-100 text-violet-700'
+                          }`}
+                        >
+                          {detectionMode}
+                        </span>
+                      )}
+                      <div
+                        className={`status-led ${
+                          !telemetryLive
+                            ? 'bg-muted'
+                            : !detectionActive
+                              ? 'bg-violet-500 active'
+                              : motorState.anomaly === 'BLOCKED'
+                                ? 'bg-red-500 active'
+                                : motorState.anomaly === 'SLOWED'
+                                  ? 'bg-yellow-500 active'
+                                  : 'bg-green-500'
+                        }`}
+                      />
+                    </div>
                   </div>
 
-                  <div className="bg-secondary/50 rounded-lg p-4 mb-3">
-                    <p
-                      className={`text-2xl font-bold tracking-wide ${
-                        !telemetryLive
-                          ? 'text-muted-foreground'
-                          : motorState.anomaly === 'BLOCKED'
-                            ? 'text-red-600'
-                            : motorState.anomaly === 'SLOWED'
-                              ? 'text-yellow-600'
-                              : 'text-green-600'
-                      }`}
-                    >
-                      {telemetryLive ? motorState.anomaly : '—'}
-                    </p>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      {!telemetryLive
-                        ? 'Pending telemetry'
-                        : anomalyLabel(motorState.anomaly)}
-                    </p>
-                  </div>
+                  {!detectionActive ? (
+                    /* Audio mode: the IMU model is not scoring, so show that plainly
+                       instead of a number that would look like a live reading. */
+                    <div className="rounded-lg border border-violet-200 bg-violet-50 p-4 mb-3">
+                      <div className="flex items-center gap-3">
+                        <AudioLines className="w-6 h-6 shrink-0 text-violet-600" />
+                        <div className="flex h-8 items-end gap-1" aria-hidden="true">
+                          {AUDIO_LEVEL_BARS.map((height, index) => (
+                            <span
+                              key={index}
+                              className="w-1.5 animate-pulse rounded-full bg-violet-400"
+                              style={{ height, animationDelay: `${index * 120}ms` }}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                      <p className="mt-3 text-base font-bold text-violet-900">
+                        Scoring paused — audio mode
+                      </p>
+                      <p className="mt-1 text-xs text-violet-800">
+                        The board is streaming audio. The edge model scores IMU data, so no
+                        anomaly score is produced while audio is active.
+                      </p>
+                      {motorState.anomalyScore !== null && (
+                        <p className="mt-2 font-mono text-xs text-violet-700/80">
+                          Last frame carried {motorState.anomalyScore}% — not evaluated.
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <>
+                      {/* Anomaly score meter — firmware that reports a percentage */}
+                      <div className="mb-3">
+                        <div className="flex items-end justify-between mb-2">
+                          <span
+                            className={`text-2xl font-mono font-bold ${
+                              anomalyScore === null ? 'text-muted-foreground' : 'text-foreground'
+                            }`}
+                          >
+                            {anomalyScore === null ? '—' : `${anomalyScore}%`}
+                          </span>
+                          <span className="text-xs font-medium text-muted-foreground">
+                            {anomalyScore === null
+                              ? telemetryLive
+                                ? 'Score not reported by this firmware'
+                                : 'Anomaly score'
+                              : anomalyScoreLabel(anomalyScore)}
+                          </span>
+                        </div>
+                        <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full transition-all duration-300 ${
+                              anomalyScore === null
+                                ? 'bg-transparent'
+                                : anomalyScoreBarClass(anomalyScore)
+                            }`}
+                            style={{ width: `${anomalyScore ?? 0}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="bg-secondary/50 rounded-lg p-4 mb-3">
+                        <p
+                          className={`text-2xl font-bold tracking-wide ${
+                            !telemetryLive
+                              ? 'text-muted-foreground'
+                              : motorState.anomaly === 'BLOCKED'
+                                ? 'text-red-600'
+                                : motorState.anomaly === 'SLOWED'
+                                  ? 'text-yellow-600'
+                                  : 'text-green-600'
+                          }`}
+                        >
+                          {telemetryLive ? motorState.anomaly : '—'}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          {!telemetryLive ? 'Pending telemetry' : anomalyLabel(motorState.anomaly)}
+                        </p>
+                      </div>
+                    </>
+                  )}
 
                   <p className="text-xs text-muted-foreground">
-                    {!telemetryLive
-                      ? transport === 'wifi'
-                        ? 'Telemetry starts when Wi-Fi delivers Motor: frames'
-                        : 'Telemetry starts when BLE notifications deliver Motor: frames'
-                      : motorState.anomaly === 'NORMAL'
-                        ? '✓ Normal Operation'
-                        : motorState.anomaly === 'SLOWED'
-                          ? '⚠️ Fan running slower than expected'
-                          : '⛔ Fan blocked or stalled'}
+                    {!detectionActive
+                      ? '🎙 Switch the board back to IMU mode to resume anomaly scoring'
+                      : !telemetryLive
+                        ? transport === 'wifi'
+                          ? 'Telemetry starts when Wi-Fi delivers Motor: frames'
+                          : 'Telemetry starts when BLE notifications deliver Motor: frames'
+                        : motorState.anomaly === 'NORMAL'
+                          ? '✓ Normal Operation'
+                          : motorState.anomaly === 'SLOWED'
+                            ? '⚠️ Fan running slower than expected'
+                            : '⛔ Fan blocked or stalled'}
                   </p>
                 </div>
 

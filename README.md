@@ -10,15 +10,19 @@ This demo is designed for exhibition environments, showcasing how the xG24 platf
 
 ## Features
 
-### Three-Mode Motor Control
-- **Stop Mode (M0):** Stops the motor completely
-- **Low Mode (M10):** Runs motor at 10 rad/sec (~95 RPM)
-- **High Mode (M20):** Runs motor at 20 rad/sec (~191 RPM)
+### Motor Control
+- **Stop (M0):** Stops the motor completely
+- **Low (M30):** Runs motor at 30 rad/sec (~287 RPM)
+- **High (M50):** Runs motor at 50 rad/sec (~477 RPM)
+- **Custom:** Any setpoint from -300 to 300 rad/sec (negative runs in reverse)
+- **Auto-Shutoff:** Lets the firmware stop the motor by itself on a sustained anomaly
+
+The two presets are defined by `MOTOR_PRESET_RAD_S` in `client/src/pages/FanController.tsx`; the button labels are generated from it, so changing a setpoint cannot leave a stale label behind.
 
 ### Real-Time Telemetry Display
 - **Motor Status:** Running, Stop, or Error states with LED indicator
 - **Speed Display:** Shows both RPM and rad/sec in real-time
-- **Anomaly Detection:** AI/ML-based anomaly detection with visual indicator
+- **Anomaly Detection:** AI/ML anomaly state, plus the 0–100 score and meter when the firmware reports one
 - **Connection Status:** Live Bluetooth connection indicator
 
 ### Modern Technical Design
@@ -35,8 +39,9 @@ This demo is designed for exhibition environments, showcasing how the xG24 platf
 
 ## Hardware Requirements
 
-- Silicon Labs MG24 development board or Arduino nano Matter  with motor control firmware
-- Motor control board running SPP firmware example
+- One of the supported boards running the motor control firmware:
+  - Silicon Labs MG24 development board or Arduino Nano Matter (SPP firmware example)
+  - Silicon Labs SiWG917 board (predictive-maintenance firmware, adds Wi-Fi)
 - Device with Bluetooth 5.0+ and Web Bluetooth API support
 - USB power for the motor control board
 
@@ -87,22 +92,27 @@ This demo is designed for exhibition environments, showcasing how the xG24 platf
 ### Command Format
 Commands are sent to the motor control board as simple text strings:
 - `M0` - Stop motor
-- `M10` - Set speed to 10 rad/sec
-- `M20` - Set speed to 20 rad/sec
+- `M30` - Set speed to 30 rad/sec (Low preset)
+- `M50` - Set speed to 50 rad/sec (High preset)
+- `M<n>` - Any setpoint in -300..300 rad/sec; negative runs in reverse
+- `AOFF1` / `AOFF0` - Enable / disable firmware auto-shutoff
 
 Each command is terminated with a newline character (`\n`).
 
 ### Feedback Format
-The motor control board sends feedback approximately every 500ms (2 Hz) in the following format:
+The motor control board sends feedback approximately every 500ms (2 Hz). Two formats are accepted, and the UI adapts to whichever the board sends. Both may carry an optional `mode:` suffix naming the sensor driving the edge model:
+
 ```
-Motor: <status>  Speed: <speed_value>
+Motor: <status>  Speed: <speed_value> Anomaly: <score>% [mode: <imu|audio>]
+Motor: <status>  Speed: <speed_value> Anomaly: <NORMAL|SLOWED|BLOCKED> [mode: <imu|audio>]
 ```
 
 **Example:**
 ```
-Motor: Running  Speed: 19.87
-Motor: Stop  Speed: 0.00
-Motor: Error  Speed: 0.00
+Motor: Running  Speed: 29.87 Anomaly: 12%
+Motor: Running  Speed: 49.50 Anomaly: 95% mode: audio
+Motor: Running  Speed: 49.72 Anomaly: SLOWED
+Motor: Stop  Speed: 0.00 Anomaly: 0%
 ```
 
 **Status Values:**
@@ -112,16 +122,35 @@ Motor: Error  Speed: 0.00
 
 **Speed Value:**
 - Floating-point number representing current speed in rad/sec
-- Range: 0.00 to 25.00 (with tolerance)
+- Signed, with a valid magnitude up to 300
 
 ## Anomaly Detection
 
-The application includes built-in anomaly detection that monitors:
-- **Status/Mode Mismatch:** Motor status doesn't match the requested mode
-- **Speed Out of Range:** Actual speed exceeds expected range for the mode
-- **Error State:** Motor reports error condition
+The edge model on the board reports how far the fan has drifted from normal running. Boards that send a numeric score drive the percentage readout and meter bar; boards that send only a state drive the state readout, and the meter shows a dash rather than a fabricated number.
 
-When an anomaly is detected, the Anomaly Detection indicator turns amber and pulses to alert the operator.
+The score is mapped to a state at fixed thresholds (`ANOMALY_SLOWED_SCORE` and `ANOMALY_BLOCKED_SCORE` in `client/src/lib/telemetry-parser.ts`):
+
+| Score | State | Meter |
+| --- | --- | --- |
+| 0–39 | `NORMAL` | green, "Normal" |
+| 40–79 | `SLOWED` | amber, "Warning" |
+| 80–100 | `BLOCKED` | red, "Critical" |
+
+The meter bands read from those same constants, so the percentage and the state readout can never disagree.
+
+With **Auto-Shutoff** enabled (`AOFF1`), the firmware stops the motor itself once an anomaly persists, rather than relying on the operator. The toggle reflects what the app last sent; it resets to off on disconnect, matching the firmware default.
+
+### Detection Modes
+
+The model scores IMU data. When a frame reports `mode: audio`, the board is streaming audio and the model is not scoring, so any number still present in the frame is stale.
+
+Rather than greying out a single indicator, the Anomaly Detection panel switches to a dedicated audio state: a violet card with a level indicator, the heading "Scoring paused — audio mode", and an explanation. The score meter and the NORMAL/SLOWED/BLOCKED readout are hidden while it is showing, so a stale number cannot be mistaken for a live reading; the value that arrived is still noted on the card and logged verbatim to the debug console. A badge next to the panel heading names the current mode whenever the firmware reports one.
+
+A frame with no `mode:` suffix counts as active, since that firmware only ever scores IMU. (The original implementation set `anomalyActive = mode === 'imu'`, which greyed out the indicator permanently on firmware that never sends the suffix.)
+
+### Debug Console
+
+The **DBG** button at the bottom right opens a log of SPP traffic. Received telemetry is shown exactly as the board sent it, including the raw score and any `mode:` suffix, rather than as a summary rebuilt from parsed fields. Connection events, such as which board profile matched, appear as `INFO` lines.
 
 ## Browser Compatibility
 
@@ -166,14 +195,28 @@ When an anomaly is detected, the Anomaly Detection indicator turns amber and pul
 | Device not appearing in scan | Check motor board is powered and in pairing mode |
 | Commands not sending | Verify Bluetooth connection is active (green indicator) |
 | No feedback received | Check motor board firmware is running SPP example |
+| "No supported SPP service on this device" | The board exposes an unknown GATT service UUID. The error lists what was found — add it as a profile in `client/src/lib/ble-profiles.ts` |
 | Anomaly keeps triggering | Verify motor board is responding with correct speed values |
 
 ## Technical Implementation Details
 
 ### Web Bluetooth SPP Connection
-The application uses the Web Bluetooth API to establish a connection to the SPP (Serial Port Profile) service:
-- **Service UUID:** `4880c12c-fdcb-4077-8920-a450d7f9b907` (Custom SPP Service)
-- **Characteristic UUID:** `fec26ec4-6d71-4442-9f81-55bc21d658d6` (Custom SPP Data)
+The application uses the Web Bluetooth API to establish a connection to the SPP (Serial Port Profile) service. Both supported firmware generations advertise the same service UUID:
+
+- **Advertised Service UUID:** `4880c12c-fdcb-4077-8920-a450d7f9b907` (Custom SPP Service)
+
+They differ in the UUIDs their GATT tables expose, so the board is identified after connecting rather than from the advertisement:
+
+| Board | GATT Service UUID | GATT Characteristic UUID |
+| --- | --- | --- |
+| MG24 / Arduino Nano Matter | `4880c12c-fdcb-4077-8920-a450d7f9b907` | `fec26ec4-6d71-4442-9f81-55bc21d658d6` |
+| SiWG917 predictive maintenance | `4880c12c-fdcb-4077-2089-50a407b9f9d7` | `fec26ec4-6d71-4442-819f-bc55d658d621` |
+
+The SiWG917 firmware builds its GATT table from Si91x `uuid_t` byte arrays whose ordering does not round-trip through Chrome, which is why the same firmware constants surface with the trailing groups byte-swapped.
+
+After the GATT connection is up, `resolveBleProfile()` in `client/src/lib/ble-profiles.ts` enumerates the services the board actually exposes and matches them against the table above. It deliberately avoids requesting a UUID the board does not have, because such a lookup stalls BlueZ ATT for roughly 30 seconds and delays telemetry. The matched board is logged to the in-app debug console (the **DBG** button, bottom right).
+
+Wi-Fi commands only exist in the SiWG917 firmware. On an MG24 board the Wi-Fi UI is hidden and no Wi-Fi probe is sent.
 
 ### Message Parsing
 Incoming feedback is buffered and parsed line-by-line using regex patterns to extract:

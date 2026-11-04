@@ -4,7 +4,7 @@ import { ChevronUp, Trash2, Copy } from 'lucide-react';
 export interface DebugMessage {
   id: string;
   timestamp: number;
-  type: 'sent' | 'received';
+  type: 'sent' | 'received' | 'info';
   data: string;
   raw?: Uint8Array;
 }
@@ -102,13 +102,15 @@ export function DebugConsole({ messages, onClear }: DebugConsoleProps) {
                     className={`py-1 px-2 rounded ${
                       msg.type === 'sent'
                         ? 'text-blue-300 bg-blue-900/20'
-                        : 'text-green-300 bg-green-900/20'
+                        : msg.type === 'info'
+                          ? 'text-amber-200 bg-amber-900/20'
+                          : 'text-green-300 bg-green-900/20'
                     }`}
                   >
                     <span className="text-gray-500">[{new Date(msg.timestamp).toLocaleTimeString()}]</span>
                     {' '}
                     <span className="font-semibold">
-                      {msg.type === 'sent' ? '→ SENT' : '← RECV'}
+                      {msg.type === 'sent' ? '→ SENT' : msg.type === 'info' ? '• INFO' : '← RECV'}
                     </span>
                     {': '}
                     <span className="break-words">{msg.data}</span>
