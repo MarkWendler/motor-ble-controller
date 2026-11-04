@@ -11,6 +11,7 @@
     "start": "NODE_ENV=production electron .",
     "preview": "vite preview --host",
     "check": "tsc --noEmit",
+    "test": "vitest run",
     "format": "prettier --write ."
   },
   "main": "dist-electron/main.js",

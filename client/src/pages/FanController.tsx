@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { Bluetooth, AlertCircle, CheckCircle2, Zap, Power, Wifi } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DebugConsole, type DebugMessage } from '@/components/DebugConsole';
-import { BLE_PROFILES, BLE_SERVICE_UUIDS } from '@/lib/ble-profiles';
+import { BLE_SERVICE_UUIDS, resolveBleProfile } from '@/lib/ble-profiles';
 import { writeBleCharacteristicChunked } from '@/lib/ble-write';
 import { TelemetryStreamParser, type MotorTelemetry, anomalyLabel } from '@/lib/telemetry-parser';
 import type { TransportKind } from '@/lib/transport/types';
@@ -35,8 +35,10 @@ declare global {
     connect(): Promise<BluetoothRemoteGATTServer>;
     disconnect(): void;
     getPrimaryService(service: string): Promise<BluetoothRemoteGATTService>;
+    getPrimaryServices(service?: string): Promise<BluetoothRemoteGATTService[]>;
   }
   interface BluetoothRemoteGATTService {
+    uuid: string;
     getCharacteristic(characteristic: string): Promise<BluetoothRemoteGATTCharacteristic>;
   }
   interface BluetoothRemoteGATTCharacteristic {
@@ -166,7 +168,7 @@ export default function FanController() {
   /**
    * Add a message to the debug console
    */
-  const addDebugMessage = (type: 'sent' | 'received', data: string, raw?: Uint8Array) => {
+  const addDebugMessage = (type: DebugMessage['type'], data: string, raw?: Uint8Array) => {
     const message: DebugMessage = {
       id: `msg-${debugMessageIdRef.current++}`,
       timestamp: Date.now(),
@@ -183,43 +185,6 @@ export default function FanController() {
   const clearDebugMessages = () => {
     setDebugMessages([]);
     debugMessageIdRef.current = 0;
-  };
-
-  /**
-   * Resolve the PM firmware GATT service.
-   * Probe only the UUID that exists on the device — a missing UUID stalls BlueZ ~30s.
-   */
-  const resolveBleProfile = async (server: BluetoothRemoteGATTServer) => {
-    const withTimeout = <T,>(promise: Promise<T>, ms: number, label: string): Promise<T> =>
-      new Promise<T>((resolve, reject) => {
-        const timer = window.setTimeout(() => {
-          reject(new Error(`${label} timed out after ${ms}ms`));
-        }, ms);
-        promise.then(
-          (value) => {
-            window.clearTimeout(timer);
-            resolve(value);
-          },
-          (err) => {
-            window.clearTimeout(timer);
-            reject(err);
-          }
-        );
-      });
-
-    const profile = BLE_PROFILES[0];
-    setConnectionStatus('Discovering services…');
-    const service = await withTimeout(
-      server.getPrimaryService(profile.serviceUuid),
-      5000,
-      'SPP service'
-    );
-    const characteristic = await withTimeout(
-      service.getCharacteristic(profile.characteristicUuid),
-      5000,
-      'SPP characteristic'
-    );
-    return { profile, characteristic };
   };
 
   /**
@@ -294,7 +259,9 @@ export default function FanController() {
        * CCCD / startNotifications or the link hits supervision timeout (0x4e08).
        */
       await new Promise((resolve) => window.setTimeout(resolve, fromWifi ? 400 : 50));
-      const { characteristic } = await resolveBleProfile(server);
+      setConnectionStatus('Discovering services…');
+      const { profile, characteristic } = await resolveBleProfile(server);
+      addDebugMessage('info', `Matched ${profile.label} firmware (service ${profile.serviceUuid})`);
 
       deviceRef.current = device;
       device.addEventListener('gattserverdisconnected', gattDisconnectedListener);
@@ -350,6 +317,10 @@ export default function FanController() {
       });
       if (fromWifi) {
         setWifiSupported(true);
+      } else if (!profile.supportsWifi) {
+        /* This firmware has no `wifi` command at all — skip the probe instead of
+         * sending the board a command it can only reject. */
+        setWifiSupported(false);
       } else {
         /*
          * Defer capability probe until after CCCD settle. Immediate wifi status
